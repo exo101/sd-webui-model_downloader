@@ -3,11 +3,25 @@ import os
 import sys
 import time
 import json
+import ssl
+import requests
 import gradio as gr
 from typing import List, Dict
 
+os.environ['SSL_CERT_FILE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['HF_HUB_DISABLE_VERIFICATION'] = '1'
+os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING'] = '1'
+
+ssl._create_default_https_context = ssl._create_unverified_context
+
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+
 try:
     from huggingface_hub import snapshot_download, hf_hub_download, list_repo_files
+    from huggingface_hub.hf_api import HfApi
+    from huggingface_hub.utils._http import hf_raise_for_status
+    from huggingface_hub.utils import build_hf_headers
 except ImportError as e:
     print(f"[ModelDownloader] 核心依赖缺失，请运行: pip install huggingface_hub")
     raise e
@@ -56,7 +70,16 @@ class ModelDownloader:
     def list_model_files(self, model_name: str, source: str) -> List[str]:
         try:
             if source == "huggingface":
-                return list_repo_files(model_name)
+                session = requests.Session()
+                session.verify = False
+                session.headers.update(build_hf_headers())
+                url = f"https://huggingface.co/api/models/{model_name}/tree/main?recursive=True&expand=False"
+                response = session.get(url)
+                hf_raise_for_status(response)
+                data = response.json()
+                files = []
+                self._extract_files(data, files)
+                return files
             else:
                 if HubApi:
                     api = HubApi()
@@ -71,6 +94,15 @@ class ModelDownloader:
         except Exception as e:
             print(f"[ModelDownloader] 获取文件列表失败: {e}")
             return []
+    
+    def _extract_files(self, data, files):
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    if item.get('type') == 'file':
+                        files.append(item.get('path', ''))
+                    elif item.get('type') == 'dir':
+                        self._extract_files(item.get('children', []), files)
 
     def download_model(self, model_name: str, source: str, save_path: str, filename: str = "") -> bool:
         try:
@@ -90,6 +122,8 @@ class ModelDownloader:
 
             if source == "huggingface":
                 print(f"[ModelDownloader] 从 HuggingFace 下载: {model_name}")
+                session = requests.Session()
+                session.verify = False
                 if filename:
                     hf_hub_download(
                         repo_id=model_name,
@@ -97,6 +131,7 @@ class ModelDownloader:
                         local_dir=save_path,
                         local_dir_use_symlinks=False,
                         token=None,
+                        session=session,
                     )
                 else:
                     ignore_8bit = not getattr(cmd_opts, 'load_in_8bit', False)
@@ -107,6 +142,7 @@ class ModelDownloader:
                         local_dir_use_symlinks=False,
                         ignore_patterns=ignore_patterns,
                         token=None,
+                        session=session,
                     )
             else:
                 print(f"[ModelDownloader] 从 ModelScope 下载: {model_name}")
